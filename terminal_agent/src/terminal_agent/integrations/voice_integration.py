@@ -11,6 +11,7 @@ import whisper
 import wave
 import threading
 import queue
+from datetime import datetime
 
 # Suppress Whisper warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -24,6 +25,12 @@ class VoiceAssistant:
         self.recognizer = sr.Recognizer()
         self.conversation_active = False
         self.command_queue = queue.Queue()
+        self.service_stats = {
+            'google': {'success': 0, 'failed': 0, 'total_time': 0},
+            'whisper': {'success': 0, 'failed': 0, 'total_time': 0},
+            'elevenlabs': {'success': 0, 'failed': 0, 'total_time': 0},
+            'system_voice': {'success': 0, 'failed': 0, 'total_time': 0}
+        }
         
         try:
             self.microphone = sr.Microphone()
@@ -126,15 +133,23 @@ class VoiceAssistant:
         try:
             with self.microphone as source:
                 print("\nListening...")
+                start_time = time.time()
                 
                 try:
                     audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
+                    audio_duration = time.time() - start_time
+                    print(f"Audio captured in {audio_duration:.2f}s")
                 except sr.WaitTimeoutError:
                     return None
                     
                 # Try Google Speech Recognition first
                 try:
+                    google_start = time.time()
                     text = self.recognizer.recognize_google(audio)
+                    google_time = time.time() - google_start
+                    self.service_stats['google']['success'] += 1
+                    self.service_stats['google']['total_time'] += google_time
+                    print(f"Google Speech Recognition: {google_time:.2f}s")
                     print(f"You said: {text}")
                     
                     # Auto-detect language from first utterance if not set
@@ -145,11 +160,14 @@ class VoiceAssistant:
                     return text.lower().strip()
                 except sr.UnknownValueError:
                     print("\nTrying Whisper...")
+                    self.service_stats['google']['failed'] += 1
                 except sr.RequestError:
                     print("\nUsing Whisper...")
+                    self.service_stats['google']['failed'] += 1
                     
                 # Try Whisper as a fallback
                 try:
+                    whisper_start = time.time()
                     audio_data = audio.get_wav_data()
                     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                         temp_wav.write(audio_data)
@@ -157,6 +175,10 @@ class VoiceAssistant:
                         result = self.whisper_model.transcribe(temp_wav.name)
                         os.remove(temp_wav.name)
                         text = result["text"].strip()
+                        whisper_time = time.time() - whisper_start
+                        self.service_stats['whisper']['success'] += 1
+                        self.service_stats['whisper']['total_time'] += whisper_time
+                        print(f"Whisper Recognition: {whisper_time:.2f}s")
                         print(f"You said: {text}")
                         
                         # Auto-detect language if not set
@@ -166,6 +188,7 @@ class VoiceAssistant:
                         return text.lower().strip()
                 except Exception as e:
                     print(f"Error in speech recognition: {str(e)}")
+                    self.service_stats['whisper']['failed'] += 1
                     return None
                     
         except Exception as e:
@@ -176,6 +199,7 @@ class VoiceAssistant:
         """Convert text to speech and play it."""
         try:
             # Try ElevenLabs first
+            elevenlabs_start = time.time()
             audio_file = self.elevenlabs.text_to_speech(text)
             if audio_file:
                 pygame.mixer.music.load(audio_file)
@@ -184,16 +208,29 @@ class VoiceAssistant:
                     time.sleep(0.1)
                 pygame.mixer.music.unload()
                 os.remove(audio_file)
+                elevenlabs_time = time.time() - elevenlabs_start
+                self.service_stats['elevenlabs']['success'] += 1
+                self.service_stats['elevenlabs']['total_time'] += elevenlabs_time
+                print(f"ElevenLabs synthesis: {elevenlabs_time:.2f}s")
                 return True
                 
             # Use system voice as fallback
             print("Using system voice...")
+            system_start = time.time()
             voice = "Alex" if self.language == "en" else "Yelda"
             os.system(f'say -v {voice} "{text}"')
+            system_time = time.time() - system_start
+            self.service_stats['system_voice']['success'] += 1
+            self.service_stats['system_voice']['total_time'] += system_time
+            print(f"System voice synthesis: {system_time:.2f}s")
             return True
             
         except Exception as e:
             print(f"Error in speak: {str(e)}")
+            if 'elevenlabs' in str(e):
+                self.service_stats['elevenlabs']['failed'] += 1
+            else:
+                self.service_stats['system_voice']['failed'] += 1
             return False
             
     def get_response(self, text):
@@ -326,3 +363,16 @@ class VoiceAssistant:
             print("\nStopping voice assistant...")
         finally:
             pygame.mixer.quit()
+
+    def print_stats(self):
+        """Print service statistics."""
+        print("\nService Statistics:")
+        for service, stats in self.service_stats.items():
+            total = stats['success'] + stats['failed']
+            if total > 0:
+                avg_time = stats['total_time'] / stats['success'] if stats['success'] > 0 else 0
+                success_rate = (stats['success'] / total) * 100 if total > 0 else 0
+                print(f"\n{service.upper()}:")
+                print(f"Success Rate: {success_rate:.1f}%")
+                print(f"Average Time: {avg_time:.2f}s")
+                print(f"Total Calls: {total}")
