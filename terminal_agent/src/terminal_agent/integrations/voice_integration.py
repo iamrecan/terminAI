@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from .elevenlabs_integration import ElevenLabsIntegration
 import whisper
 import wave
+import threading
+import queue
 
 # Suppress Whisper warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -20,6 +22,9 @@ class VoiceAssistant:
         load_dotenv(env_path)
         
         self.recognizer = sr.Recognizer()
+        self.conversation_active = False
+        self.command_queue = queue.Queue()
+        
         try:
             self.microphone = sr.Microphone()
             self.microphone_available = True
@@ -58,7 +63,7 @@ class VoiceAssistant:
         self.elevenlabs = ElevenLabsIntegration()
         
         # Language settings
-        self.language = "en"  # Default to English
+        self.language = None  # Default to None for auto-detection
         
     @property
     def whisper_model(self):
@@ -67,15 +72,44 @@ class VoiceAssistant:
             self._whisper_model = whisper.load_model("base")
         return self._whisper_model
         
+    def detect_language(self, text):
+        """Detect language from text using Whisper."""
+        try:
+            # Use Whisper's language detection
+            result = self.whisper_model.transcribe(text, task="detect_language")
+            detected_lang = result.get("language", "en")
+            
+            # Map Whisper language codes to our supported languages
+            lang_map = {
+                "en": "en",
+                "tr": "tr",
+                # Add more languages as needed
+            }
+            
+            return lang_map.get(detected_lang, "en")
+        except Exception as e:
+            print(f"Language detection error: {str(e)}")
+            return "en"  # Default to English on error
+            
     def set_language(self, lang):
         """Set the assistant's language."""
         if lang in ["en", "tr"]:
             self.language = lang
             # Reset chat with new language context
             if self.model:
-                context = ("You are a helpful AI assistant. Keep your responses natural and conversational. "
-                          f"Always respond in {'English' if lang == 'en' else 'Turkish'}. "
-                          "If the user asks to exit, respond with a goodbye message.")
+                context = (
+                    "You are a friendly voice assistant. Follow these rules strictly:\n"
+                    "1. Keep responses very short and conversational, max 1-2 sentences\n"
+                    "2. Use casual, everyday language like in real conversations\n"
+                    "3. Skip greetings and pleasantries unless explicitly asked\n"
+                    "4. Don't explain or apologize, just respond naturally\n"
+                    f"5. Always respond in {'English' if lang == 'en' else 'Turkish'}\n"
+                    "6. If asked to exit, just say a quick goodbye\n"
+                    "Example responses:\n"
+                    "- 'What's the weather?' -> 'It's sunny and warm today'\n"
+                    "- 'How are you?' -> 'Doing great, you?'\n"
+                    "- 'Tell me about AI' -> 'AI helps computers understand and learn like humans do'"
+                )
                 self.chat = self.model.start_chat(history=[])
                 self.chat.send_message(context)
             print(f"Language set to: {'English' if lang == 'en' else 'Turkish'}")
@@ -91,36 +125,44 @@ class VoiceAssistant:
             
         try:
             with self.microphone as source:
-                print("\nListening... (Press Ctrl+C to exit)")
+                print("\nListening...")
                 
                 try:
                     audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
                 except sr.WaitTimeoutError:
-                    print("No speech detected, listening again...")
                     return None
                     
                 # Try Google Speech Recognition first
                 try:
-                    print("\nProcessing with Google Speech Recognition...")
-                    text = self.recognizer.recognize_google(audio, language="en-US" if self.language == "en" else "tr-TR")
+                    text = self.recognizer.recognize_google(audio)
                     print(f"You said: {text}")
+                    
+                    # Auto-detect language from first utterance if not set
+                    if not hasattr(self, 'language') or self.language is None:
+                        detected_lang = self.detect_language(text)
+                        self.set_language(detected_lang)
+                        
                     return text.lower().strip()
                 except sr.UnknownValueError:
-                    print("\nGoogle could not understand audio, trying Whisper...")
+                    print("\nTrying Whisper...")
                 except sr.RequestError:
-                    print("\nGoogle service unavailable, trying Whisper...")
+                    print("\nUsing Whisper...")
                     
                 # Try Whisper as a fallback
                 try:
-                    print("Processing with Whisper...")
                     audio_data = audio.get_wav_data()
                     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                         temp_wav.write(audio_data)
                         temp_wav.flush()
-                        result = self.whisper_model.transcribe(temp_wav.name, language=self.language)
+                        result = self.whisper_model.transcribe(temp_wav.name)
                         os.remove(temp_wav.name)
                         text = result["text"].strip()
                         print(f"You said: {text}")
+                        
+                        # Auto-detect language if not set
+                        if not hasattr(self, 'language') or self.language is None:
+                            self.set_language(result.get("language", "en"))
+                            
                         return text.lower().strip()
                 except Exception as e:
                     print(f"Error in speech recognition: {str(e)}")
@@ -181,6 +223,89 @@ class VoiceAssistant:
             else:
                 return "Üzgünüm, bir hata oluştu. Tekrar deneyebilir misiniz?"
             
+    def is_command(self, text):
+        """Check if the input is a command."""
+        commands = {
+            'en': {
+                'exit': ['exit', 'quit', 'bye', 'goodbye', 'stop'],
+                'switch_lang': ['switch language', 'change language'],
+                'help': ['help', 'commands', 'what can you do'],
+                'clear': ['clear', 'clear chat', 'reset chat']
+            },
+            'tr': {
+                'exit': ['çık', 'çıkış', 'güle güle', 'hoşça kal', 'dur', 'kapat'],
+                'switch_lang': ['dil değiştir', 'dili değiştir'],
+                'help': ['yardım', 'komutlar', 'neler yapabilirsin'],
+                'clear': ['temizle', 'sohbeti temizle', 'sohbeti sıfırla']
+            }
+        }
+        
+        text = text.lower().strip()
+        current_commands = commands[self.language]
+        
+        for cmd_type, cmd_list in current_commands.items():
+            if any(cmd in text for cmd in cmd_list):
+                return cmd_type
+        return None
+
+    def handle_command(self, command_type):
+        """Handle system commands during conversation."""
+        if command_type == 'exit':
+            return None
+        elif command_type == 'switch_lang':
+            new_lang = 'tr' if self.language == 'en' else 'en'
+            self.set_language(new_lang)
+            return "Language switched!" if new_lang == 'en' else "Dil değiştirildi!"
+        elif command_type == 'help':
+            if self.language == 'en':
+                return "Available commands: exit, switch language, help, clear chat"
+            else:
+                return "Mevcut komutlar: çıkış, dil değiştir, yardım, temizle"
+        elif command_type == 'clear':
+            if self.model:
+                self.chat = self.model.start_chat(history=[])
+            return "Chat cleared!" if self.language == 'en' else "Sohbet temizlendi!"
+        return None
+
+    def command_listener(self):
+        """Listen for commands in a separate thread."""
+        while self.conversation_active:
+            try:
+                cmd = input().strip().lower()
+                self.command_queue.put(cmd)
+                if cmd in ['exit', 'quit', 'stop', 'çık', 'çıkış', 'dur']:
+                    break
+            except Exception:
+                continue
+
+    def start_conversation(self):
+        """Start interactive conversation mode."""
+        if not self.microphone_available:
+            print("Error: Cannot start conversation - microphone not available")
+            return
+            
+        print("\nConversation mode activated in background.")
+        print("Language will be detected automatically from your speech.")
+        print("You can continue using agent commands while conversing.")
+        print("Type 'stop conversation' to end.")
+        
+        self.conversation_active = True
+        
+        try:
+            while self.conversation_active:
+                text = self.listen()
+                if text and self.conversation_active:
+                    response = self.get_response(text)
+                    if response:
+                        print(f"\nAssistant: {response}")
+                        self.speak(response)
+                    
+        except KeyboardInterrupt:
+            print("\nStopping conversation...")
+        finally:
+            self.conversation_active = False
+            pygame.mixer.quit()
+
     def start(self):
         """Start voice command mode."""
         if not self.microphone_available:
@@ -199,46 +324,5 @@ class VoiceAssistant:
                     print(f"Command received: {text}")
         except KeyboardInterrupt:
             print("\nStopping voice assistant...")
-        finally:
-            pygame.mixer.quit()
-            
-    def start_conversation(self):
-        """Start interactive conversation mode."""
-        if not self.microphone_available:
-            print("Error: Cannot start conversation - microphone not available")
-            return
-            
-        # Ask for language preference
-        print("\nSelect language / Dil seçin:")
-        print("1. English")
-        print("2. Türkçe")
-        
-        try:
-            choice = input("Enter 1 or 2: ").strip()
-            self.set_language("en" if choice == "1" else "tr")
-        except Exception:
-            print("Invalid choice. Using English.")
-            self.set_language("en")
-            
-        print("\nConversation mode activated.")
-        print("Say 'exit', 'quit', 'stop', or 'bye' to end." if self.language == "en" else 
-              "Çıkmak için 'çık', 'çıkış', 'dur' veya 'hoşça kal' deyin.")
-        
-        try:
-            while True:
-                text = self.listen()
-                if text:
-                    response = self.get_response(text)
-                    if response is None:  # Exit command detected
-                        final_msg = "Goodbye! Take care!" if self.language == "en" else "Görüşmek üzere!"
-                        print(f"\nAssistant: {final_msg}")
-                        self.speak(final_msg)
-                        break
-                        
-                    print(f"\nAssistant: {response}")
-                    self.speak(response)
-                    
-        except KeyboardInterrupt:
-            print("\nStopping conversation...")
         finally:
             pygame.mixer.quit()

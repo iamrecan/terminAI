@@ -62,6 +62,8 @@ class TerminalAgent:
         self.vscode = VSCodeIntegration()
         self.project_manager = ProjectManager()
         
+        self.conversation_thread = None
+        
         self.commands = {
             'help': self.show_help,
             'exit': self.exit,
@@ -76,7 +78,8 @@ class TerminalAgent:
             'listen': self.listen,
             'speak': self.voice_speak,
             'stop': self.voice_stop,
-            'conversation': self.conversation,
+            'conversation': self.start_conversation_thread,
+            'stop conversation': self.stop_conversation,
             'open-vscode': self.handle_open_vscode,
             'terminal': self.handle_terminal,
             'run': self.handle_run_command,
@@ -104,7 +107,8 @@ class TerminalAgent:
         print(f"  listen  - Start voice recognition")
         print(f"  speak   - Convert text to speech (e.g., 'speak hello')")
         print(f"  stop    - Stop voice recognition")
-        print(f"  conversation - Start an interactive conversation mode")
+        print(f"  conversation - Start a conversation mode with voice")
+        print(f"  stop conversation - Stop the conversation mode")
         print(f"  open vscode - Open VS Code")
         print(f"  terminal - Open terminal in VS Code")
         print(f"  run - Execute a command")
@@ -537,6 +541,27 @@ class TerminalAgent:
         """Start project setup conversation"""
         self.project_manager.start_conversation()
 
+    def start_conversation_thread(self, *args):
+        """Start conversation in a separate thread."""
+        if self.conversation_thread and self.conversation_thread.is_alive():
+            print("Conversation is already running!")
+            return
+            
+        self.conversation_thread = threading.Thread(
+            target=self.conversation,
+            daemon=True
+        )
+        self.conversation_thread.start()
+        
+    def stop_conversation(self, *args):
+        """Stop the conversation thread."""
+        if self.conversation_thread and self.conversation_thread.is_alive():
+            self.voice.conversation_active = False
+            self.conversation_thread.join(timeout=1)
+            print("Conversation stopped.")
+        else:
+            print("No active conversation to stop.")
+            
     def process_command(self, command_input):
         """Process the user's command."""
         if not command_input:
