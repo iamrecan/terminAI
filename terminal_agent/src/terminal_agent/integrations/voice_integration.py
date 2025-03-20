@@ -22,8 +22,14 @@ class VoiceAssistant:
         env_path = os.path.join(os.path.dirname(__file__), "../../../config/.env")
         load_dotenv(env_path)
         
+        # Suppress pygame welcome message
+        os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
+        pygame.mixer.init()
+        print("Initializing audio system...")
+        
         self.recognizer = sr.Recognizer()
         self.conversation_active = False
+        self.listening = False
         self.command_queue = queue.Queue()
         self.service_stats = {
             'google': {'success': 0, 'failed': 0, 'total_time': 0},
@@ -32,20 +38,19 @@ class VoiceAssistant:
             'system_voice': {'success': 0, 'failed': 0, 'total_time': 0}
         }
         
+        # Initialize microphone only once
         try:
+            print("Initializing voice recognition system...")
             self.microphone = sr.Microphone()
             self.microphone_available = True
-            
-            # Adjust microphone settings
             with self.microphone as source:
-                print("Initializing microphone...")
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
                 self.recognizer.dynamic_energy_threshold = True
                 self.recognizer.energy_threshold = 4000
-                
+            print("Voice recognition system ready.")
         except (OSError, AttributeError) as e:
             self.microphone_available = False
-            print("Warning: Microphone not available")
+            print("Warning: Voice recognition system not available")
             
         # Initialize Whisper only if needed
         self._whisper_model = None
@@ -66,7 +71,6 @@ class VoiceAssistant:
             self.model = None
             self.chat = None
             
-        pygame.mixer.init()
         self.elevenlabs = ElevenLabsIntegration()
         
         # Language settings
@@ -106,16 +110,17 @@ class VoiceAssistant:
             if self.model:
                 context = (
                     "You are a friendly voice assistant. Follow these rules strictly:\n"
-                    "1. Keep responses very short and conversational, max 1-2 sentences\n"
-                    "2. Use casual, everyday language like in real conversations\n"
-                    "3. Skip greetings and pleasantries unless explicitly asked\n"
-                    "4. Don't explain or apologize, just respond naturally\n"
+                    "1. Keep responses EXTREMELY short - maximum 10-15 words\n"
+                    "2. Use casual, everyday language\n"
+                    "3. Never explain or apologize\n"
+                    "4. Never add greetings or pleasantries\n"
                     f"5. Always respond in {'English' if lang == 'en' else 'Turkish'}\n"
-                    "6. If asked to exit, just say a quick goodbye\n"
-                    "Example responses:\n"
-                    "- 'What's the weather?' -> 'It's sunny and warm today'\n"
-                    "- 'How are you?' -> 'Doing great, you?'\n"
-                    "- 'Tell me about AI' -> 'AI helps computers understand and learn like humans do'"
+                    "6. Never ask follow-up questions\n"
+                    "Examples:\n"
+                    "- User: 'What's the weather?' → 'It's sunny and warm today'\n"
+                    "- User: 'Tell me about AI' → 'AI helps computers think and learn'\n"
+                    "- User: 'How are you?' → 'Doing great!'\n"
+                    "- User: 'What can you do?' → 'I can chat, help with tasks, and answer questions'"
                 )
                 self.chat = self.model.start_chat(history=[])
                 self.chat.send_message(context)
@@ -127,7 +132,7 @@ class VoiceAssistant:
     def listen(self):
         """Record audio from microphone and convert to text"""
         if not self.microphone_available:
-            print("Error: Microphone not available")
+            print("Error: Voice recognition system not available")
             return None
             
         try:
@@ -239,26 +244,44 @@ class VoiceAssistant:
         exit_commands_en = ['exit', 'quit', 'bye', 'goodbye', 'stop']
         exit_commands_tr = ['çık', 'çıkış', 'güle güle', 'hoşça kal', 'dur']
         
-        if any(cmd in text.lower() for cmd in (exit_commands_en if self.language == "en" else exit_commands_tr)):
+        text = text.lower().strip()
+        if any(cmd in text for cmd in (exit_commands_en if self.language == "en" else exit_commands_tr)):
             return None  # Signal to stop conversation
             
         try:
             if self.chat:
-                response = self.chat.send_message(text)
-                return response.text
+                # Add generation config for shorter responses
+                generation_config = {
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 64,  # Limit output length
+                }
+                
+                # Add specific prompt to encourage shorter response
+                prompt = f"Remember to keep response very short (max 15 words). User said: {text}"
+                response = self.chat.send_message(prompt, generation_config=generation_config)
+                
+                # Post-process response to ensure it's short
+                response_text = response.text.strip()
+                words = response_text.split()
+                if len(words) > 15:
+                    response_text = ' '.join(words[:15]) + '...'
+                
+                return response_text
             else:
                 # Fallback responses if AI is not available
                 if self.language == "en":
-                    return "I apologize, but I'm having trouble connecting to my AI service. Please try again later."
+                    return "Sorry, AI service is unavailable right now."
                 else:
-                    return "Üzgünüm, AI servisine bağlanmakta sorun yaşıyorum. Lütfen daha sonra tekrar deneyin."
+                    return "Üzgünüm, AI servisi şu anda kullanılamıyor."
                     
         except Exception as e:
             print(f"Error getting AI response: {str(e)}")
             if self.language == "en":
-                return "I'm sorry, I encountered an error. Could you please try again?"
+                return "Sorry, something went wrong."
             else:
-                return "Üzgünüm, bir hata oluştu. Tekrar deneyebilir misiniz?"
+                return "Üzgünüm, bir hata oluştu."
             
     def is_command(self, text):
         """Check if the input is a command."""
@@ -315,10 +338,23 @@ class VoiceAssistant:
             except Exception:
                 continue
 
+    def start_listening(self):
+        """Start voice recognition mode."""
+        if not self.microphone_available:
+            print("Error: Voice recognition system not available")
+            return False
+            
+        self.listening = True
+        return True
+        
+    def stop_listening(self):
+        """Stop voice recognition mode."""
+        self.listening = False
+
     def start_conversation(self):
         """Start interactive conversation mode."""
         if not self.microphone_available:
-            print("Error: Cannot start conversation - microphone not available")
+            print("Error: Cannot start conversation - voice recognition system not available")
             return
             
         print("\nConversation mode activated in background.")
@@ -346,7 +382,7 @@ class VoiceAssistant:
     def start(self):
         """Start voice command mode."""
         if not self.microphone_available:
-            print("Error: Cannot start voice assistant - microphone not available")
+            print("Error: Cannot start voice assistant - voice recognition system not available")
             return
             
         print("\nVoice Assistant activated. Say 'exit' or press Ctrl+C to quit.")
