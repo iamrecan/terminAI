@@ -2,24 +2,19 @@
 
 import os
 import subprocess
-from dotenv import load_dotenv
 from typing import Optional, Dict, List
 from .aider_project_agent import AiderProjectAgent
 import json
-#import openai
 
 class AiderIntegration:
     """Integration for Aider and other AI coding assistants."""
     
     def __init__(self):
-        env_path = os.path.join(os.path.dirname(__file__), "../../../config/.env")
-        load_dotenv(env_path)
-        
-        # Load API keys
-        self.openai_key = os.getenv('OPENAI_API_KEY')
-        self.deepseek_key = os.getenv('DEEPSEEK_API_KEY')
-        self.anthropic_key = os.getenv('ANTHROPIC_API_KEY')
-        self.gemini_key = os.getenv('GOOGLE_AI_KEY')
+        from ..core.config import config
+        self.openai_key = config.openai_api_key
+        self.deepseek_key = config.deepseek_api_key
+        self.anthropic_key = config.anthropic_api_key
+        self.gemini_key = config.google_api_key
         
         # Initialize status flags
         self.available_assistants = self._check_available_assistants()

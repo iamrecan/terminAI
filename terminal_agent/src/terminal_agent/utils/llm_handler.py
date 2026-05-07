@@ -1,8 +1,6 @@
-import google.generativeai as genai
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-import os
-from dotenv import load_dotenv
+import json
 
 @dataclass
 class Solution:
@@ -13,13 +11,8 @@ class Solution:
 
 class LLMHandler:
     def __init__(self):
-        load_dotenv()
-        api_key = os.getenv('GOOGLE_API_KEY')
-        if not api_key:
-            raise Exception("GOOGLE_API_KEY not found in environment")
-        
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-pro')
+        from ..core.providers import LLMRouter
+        self._router = LLMRouter()
     
     def analyze_terminal_output(self, output: str) -> Solution:
         """Analyze terminal output and generate solution"""
@@ -49,9 +42,16 @@ Focus on:
 5. Path-related issues"""
 
         try:
-            response = self.model.generate_content(prompt)
-            solution_data = eval(response.text)  # Parse the JSON-like response
-            
+            import asyncio
+            response_text = asyncio.get_event_loop().run_until_complete(
+                self._router.complete(prompt, task_type="deep_reasoning")
+            )
+            # Strip markdown code fences if present
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            solution_data = json.loads(text)
+
             return Solution(
                 description=solution_data['solution']['description'],
                 commands=solution_data['solution']['commands'],

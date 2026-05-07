@@ -1,13 +1,12 @@
 from notion_client import Client
 from datetime import datetime
 import os
-from dotenv import load_dotenv
 
 class NotionIntegration:
     def __init__(self):
-        load_dotenv()
-        self.notion = Client(auth=os.getenv("NOTION_TOKEN"))
-        self.database_id = os.getenv("NOTION_DATABASE_ID")
+        from ..core.config import config
+        self.notion = Client(auth=config.notion_token)
+        self.database_id = config.notion_database_id
 
     def get_tasks_for_today(self):
         if not self.notion or not self.database_id:
